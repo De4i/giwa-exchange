@@ -1,8 +1,13 @@
 import type { Address, Chain } from "viem";
+import {
+  ammCompoundingPoolV3Abi,
+  ammConcentratedPoolV3Abi,
+} from "@ammora-protocol/sdk";
 
 export const RPC_URL =
   process.env.NEXT_PUBLIC_RPC_URL ?? "https://sepolia-rpc.giwa.io";
 export const EXPLORER_URL = "https://sepolia-explorer.giwa.io";
+export const INDEXER_URL = "https://api-ec2.ammora.org/v1";
 export const CHAIN_ID = 91342;
 
 export const giwaSepolia = {
@@ -271,3 +276,51 @@ export const WETH_ABI = [
     outputs: [],
   },
 ] as const;
+
+// ------------------------------------------------------- Ammora pool ABIs
+// The SDK ships the pool interfaces (ammCompoundingPoolV3Abi /
+// ammConcentratedPoolV3Abi). Both pool kinds expose the same liquidity
+// surface used by the Add LP panel: previewAddLiquidity, addLiquidity,
+// addLiquidityToPosition, getPosition, previewRemoveLiquidity, ownerOf.
+// The two addLiquidity signatures differ: compounding takes
+// (maxBase, maxQuote, minLiquidity, recipient, lockDuration, permanentLock,
+// deadline), concentrated takes (maxBase, maxQuote, minLiquidity, recipient,
+// deadline) with NO tick range, so a concentrated add mints a full-range
+// position. Both were dry-run with eth_call against the live RPC (see
+// README "Add LP") before the panel was wired to them.
+export function poolAbi(kind: PairKind) {
+  return kind === "concentrated"
+    ? ammConcentratedPoolV3Abi
+    : ammCompoundingPoolV3Abi;
+}
+
+export const ERC20_META_ABI = [
+  {
+    type: "function",
+    name: "name",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "string" }],
+  },
+  {
+    type: "function",
+    name: "symbol",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "string" }],
+  },
+  {
+    type: "function",
+    name: "decimals",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "uint8" }],
+  },
+] as const;
+
+// keccak256("Transfer(address,address,uint256)"), used to spot the position
+// NFT mint in an add-liquidity receipt.
+export const TRANSFER_TOPIC =
+  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
+export const ZERO_TOPIC =
+  "0x0000000000000000000000000000000000000000000000000000000000000000";

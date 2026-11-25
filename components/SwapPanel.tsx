@@ -28,6 +28,8 @@ import {
   shortAddr,
   useWallet,
 } from "@/lib/wallet";
+import ImportToken from "@/components/ImportToken";
+import type { ImportedToken } from "@/lib/importedTokens";
 
 function fmt(amount: bigint, decimals: number, maxFrac = 6): string {
   const s = formatUnits(amount, decimals);
@@ -48,10 +50,26 @@ type Phase =
 
 type Balances = { native: bigint; weth: bigint; token: bigint };
 
-export default function SwapPanel() {
+export default function SwapPanel({
+  importedPairs = [],
+  importedTokens = [],
+  onImport,
+  onRemoveToken,
+}: {
+  importedPairs?: Pair[];
+  importedTokens?: ImportedToken[];
+  onImport: (token: ImportedToken) => void;
+  onRemoveToken: (address: string) => void;
+}) {
   const { account, wrongChain, connect, ensureChain, connectError } =
     useWallet();
   const [pair, setPair] = useState<Pair>(PAIRS[0]);
+  const allPairs = useMemo(() => [...PAIRS, ...importedPairs], [importedPairs]);
+
+  // If the selected imported pair is removed, fall back to tAMM/ETH.
+  useEffect(() => {
+    if (!allPairs.some((p) => p.id === pair.id)) setPair(PAIRS[0]);
+  }, [allPairs, pair.id]);
   const [side, setSide] = useState<"buy" | "sell">("buy"); // buy = pay ETH
   const [amount, setAmount] = useState("0.01");
   const [slippage, setSlippage] = useState("1");
@@ -409,7 +427,7 @@ export default function SwapPanel() {
 
   // -------------------------------------------------------------------- UI
   return (
-    <section className="swap" aria-label="Swap">
+    <div aria-label="Swap">
       <div className="swap-head">
         <h2>Swap</h2>
         <span className="chip">
@@ -451,17 +469,22 @@ export default function SwapPanel() {
         <select
           value={pair.id}
           onChange={(e) => {
-            setPair(PAIRS.find((p) => p.id === e.target.value) ?? PAIRS[0]);
+            setPair(allPairs.find((p) => p.id === e.target.value) ?? PAIRS[0]);
             setQuote(null);
           }}
         >
-          {PAIRS.map((p) => (
+          {allPairs.map((p) => (
             <option key={p.id} value={p.id}>
               {p.label} · {p.poolKind}
             </option>
           ))}
         </select>
       </label>
+      <ImportToken
+        imported={importedTokens}
+        onImport={onImport}
+        onRemove={onRemoveToken}
+      />
       <p className="note">{pair.note}</p>
       <p className="note">
         Pool{" "}
@@ -647,6 +670,6 @@ export default function SwapPanel() {
         the pool itself, then send the swap. Testnet only, tokens are play
         money.
       </p>
-    </section>
+    </div>
   );
 }

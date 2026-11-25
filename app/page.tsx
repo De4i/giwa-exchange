@@ -1,4 +1,4 @@
-import SwapPanel from "@/components/SwapPanel";
+import TradeCard from "@/components/TradeCard";
 import StakePanel from "@/components/StakePanel";
 import TokenBoard from "@/components/TokenBoard";
 import Ecosystem from "@/components/Ecosystem";
@@ -42,8 +42,9 @@ export default async function Home() {
             <code>quoteAmmoraExactIn</code>, execution via the SDK's native
             router builders and <code>buildAmmoraExactInCalldata</code>.
             Connect a browser wallet, switch to GIWA Sepolia, pay with native
-            ETH, and stake tAMM in the Season 2 staking contract, all against
-            the same contracts the Ammora app itself uses.
+            ETH, add liquidity to the same pools, import any ERC-20 by
+            contract address, and stake tAMM in the Season 2 staking contract,
+            all against the same contracts the Ammora app itself uses.
           </p>
           <div className="stats">
             <div className="stat">
@@ -77,7 +78,7 @@ export default async function Home() {
           </p>
         </div>
         <div className="hero-swap">
-          <SwapPanel />
+          <TradeCard />
         </div>
         <StakePanel />
         <div className="pools-card">

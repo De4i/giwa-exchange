@@ -3,7 +3,8 @@
 A working mini exchange for the **GIWA Sepolia** testnet (chainId 91342),
 built with the **Ammora SDK** for the Ammora Builder mission ("Ship an
 exchange or launchpad with the Ammora SDK"). It provides live quotes and real
-swaps against Ammora pools (paid in native ETH), tAMM staking against the
+swaps against Ammora pools (paid in native ETH), adding liquidity to the same
+pools, importing any ERC-20 by contract address, tAMM staking against the
 Season 2 staking contract, a live token board, and the giwa.eco ecosystem
 directory — all from public data and the visitor's own browser wallet.
 
@@ -85,6 +86,105 @@ the same API the Ammora web app uses) and cross-checked on-chain.
 Pairs without a verified pool are not listed at all — the selector only
 contains markets that quoted successfully.
 
+## Add LP (Add Liquidity panel)
+
+The "Add LP" tab next to Swap adds liquidity to the same verified pools
+(tAMM, LODOS, AUICMP vs WETH/ETH), plus any imported pair that has a pool
+(see "Import token" below). The flow is pull-based, like the swaps: approve
+the pool for both tokens, then call `addLiquidity` on the pool itself with
+the SDK's pool interface (`ammCompoundingPoolV3Abi` /
+`ammConcentratedPoolV3Abi` from `@ammora-protocol/sdk`).
+
+- **Amounts.** You type one side; the other is filled in from the pool's
+  live reserve ratio (`reserveBase` / `reserveQuote` read on-chain), and
+  `previewAddLiquidity` then shows the exact amounts the pool will take and
+  the liquidity you will receive. Minimum liquidity applies the chosen
+  slippage (default 1%) to the preview.
+- **ETH side.** The pool only accepts WETH, even for the tAMM pool, so ETH
+  in your wallet is wrapped to WETH for the shortfall inside the flow (the
+  same wrap-assisted pattern as the swaps). The panel says this out loud.
+  There is no native-ETH LP route: the Ammora native router only covers
+  swaps, not liquidity.
+- **Pool kinds.** Compounding pools take `(maxBase, maxQuote, minLiquidity,
+  recipient, lockDuration, permanentLock, deadline)`; this app passes lock
+  duration 0 and permanent lock false (an unlocked position). Concentrated
+  pools take `(maxBase, maxQuote, minLiquidity, recipient, deadline)` with
+  **no tick range**: the ABI has no tick arguments, so a concentrated add
+  mints a full-range position covering the pool's whole price range, and the
+  panel says so instead of showing a fake range picker.
+- **Your LP position.** Positions are ERC-721 NFTs minted by the pool. The
+  panel lists yours per pool: tokenIds come from the explorer's ERC-721
+  transfer history for the pool (`/api/positions`, which replays transfers
+  and keeps only tokenIds still owned by your address), then each position
+  is read on-chain (`ownerOf`, `getPosition`, `previewRemoveLiquidity`), so
+  the amounts shown are the live redeemable amounts for that position's
+  liquidity. No APY is shown.
+- **Success.** The transaction hash links to the explorer, and the minted
+  position NFT id is read back from the receipt's Transfer mint log.
+
+### How the add-liquidity calldata was evidenced (before shipping)
+
+The SDK has no `buildV3*Mint` / `addLiquidity` calldata builder for these
+pools (its `buildV3PermitAddPoolLiquidity` targets the permit router, not
+the pools), so the panel encodes `addLiquidity` directly against the SDK's
+own pool ABIs. That shape was evidenced two independent ways:
+
+1. **On-chain transactions (compounding).** The AUICMP pool has successful
+   `addLiquidity` calls with exactly this shape: tx
+   `0x5955a4573fc4992a6418758f582c9fa7be34d913b42918d7b41462084c6ed601`
+   and `0x6ca5b7b842c07c3a1a9c15af0056bcbfc3753b2badb5e7724cf74a0ed500d2a6`,
+   both selector `0xaba41a33`, lock duration 0, permanent lock false, and
+   both minted a position NFT (tokenIds 5 and 4). The tAMM pool uses the
+   same compounding ABI and selector.
+2. **eth_call dry-run with state override (all three pools).** For each
+   pool, `addLiquidity` was simulated against the live RPC from a test
+   caller whose token balances and pool allowances were supplied via
+   `eth_call` state override (token storage slots verified first: balances
+   slot 6 / allowances slot 7 for the tAMM-family tokens, WETH slots 0/1).
+   All three returned success with the expected four values
+   (tokenId, liquidity, baseUsed, quoteUsed): LODOS (concentrated,
+   selector `0xc4dbea95`) minted tokenId 3 with 100 LODOS + 0.00006359 WETH
+   used; tAMM minted tokenId 3 with 100 tAMM + 0.44158 WETH; AUICMP minted
+   tokenId 6 with 100 AUICMP + 0.00004997 WETH. The next tokenIds line up
+   with the pools' existing positions (LODOS has 1-2, tAMM has 1-2, AUICMP
+   has 1-5), which cross-checks the simulation. `previewAddLiquidity`
+   agrees with the dry-run amounts to the raw unit.
+
+Honest limits: no remove-liquidity button is shipped yet (the position
+amounts shown are the preview of a full removal); the LODOS and tAMM pools
+have never had a direct user `addLiquidity` before (their only positions
+came from migration at pool creation), so the concentrated evidence is the
+dry-run plus the shared ABI, not a prior user transaction; and the app does
+not route LP adds through the Ammora zap router, so single-sided (zap-in)
+adds are not offered.
+
+## Import token by contract address
+
+The Swap panel has an "Import token" control, and imported pairs are shared
+with the Add LP tab. Paste any `0x` contract address; the app validates it
+step by step and reports the first failure inline:
+
+1. **Format** — checksummed address via viem `getAddress`.
+2. **Code** — `getBytecode` on GIWA Sepolia must be non-empty.
+3. **ERC-20** — `name()`, `symbol()`, `decimals()` must all answer.
+4. **Explorer record** — Blockscout token record (`/api/token-record`) for
+   holder/transfer context; a token the explorer has not indexed yet is
+   still importable, with that noted.
+5. **Pool** — the indexer is queried with its `baseToken` filter
+   (`/api/pool-for-token`) for an ACTIVE pool of this token vs WETH.
+6. **Quote** — when a pool exists, a live SDK quote probe (0.001 WETH) must
+   return a positive amount.
+
+If a pool exists and quotes, the token joins the pair selector and swaps
+and LP exactly like a built-in pair (wrap-assisted, same slippage and
+approve flow, pool address shown). If no pool exists, the token is still
+listed as imported but marked "No Ammora pool found" and cannot be selected
+for swapping; if a pool exists but the quote probe fails, it is likewise
+disabled with the reason shown. Duplicates (already built-in or already
+imported) are rejected with a clear message. Imports persist in the
+browser only (`localStorage`, key `giwa-exchange.imported-tokens.v1`), with
+a remove button per token; nothing is pre-imported.
+
 ## Staking (Stake tAMM panel)
 
 The panel under the network stats talks directly to the Ammora Season 2
@@ -131,9 +231,9 @@ shows only live balances (wallet, staked, claimable, total staked).
 ## Layout
 
 The top section is a two-column grid: hero copy, the Stake tAMM panel and a
-verified-pools card fill the left column; the swap panel sits in the right
-column and sticks while scrolling. On mobile everything stacks in reading
-order (intro, swap, stake, pools).
+verified-pools card fill the left column; the Swap / Add LP tabbed card sits
+in the right column and sticks while scrolling. On mobile everything stacks
+in reading order (intro, trade card, stake, pools).
 
 ## Data sources (all public, read-only, no keys)
 

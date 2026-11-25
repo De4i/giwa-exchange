@@ -198,6 +198,26 @@ h2 {
   align-items: center;
   margin-bottom: 10px;
 }
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.tab {
+  background: var(--panel2);
+  color: var(--mut);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 7px 16px;
+  cursor: pointer;
+  font-weight: 700;
+  font-size: 13.5px;
+}
+.tab.active {
+  background: var(--acc);
+  border-color: var(--acc);
+  color: #06121d;
+}
 .chip {
   display: inline-block;
   border: 1px solid var(--line);
