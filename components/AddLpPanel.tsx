@@ -51,6 +51,255 @@ type Phase =
   | "add-confirming"
   | "done";
 
+// ------------------------------------------------------- remove liquidity
+// One position's remove controls. The remove call is the pool's own
+// `removeLiquidity(tokenId, liquidity, minimumBaseAmount,
+// minimumQuoteAmount, recipient, deadline)` (selector 0xf7f4925d), sent
+// straight to the pool by the position owner. There is deliberately NO
+// NFT-approval step: the real on-chain remove (AUICMP tokenId 5, tx
+// 0xc10fb9f6…) was preceded only by the ERC-20 approves for its add, and
+// Ammora's own planner builds the same straight-to-pool transaction with
+// no approval requirement. Minimums are the live preview amounts with the
+// panel's slippage applied, the same rule Ammora's planner uses.
+function RemovePosition({
+  position,
+  pair,
+  slippageBps,
+  onRemoved,
+}: {
+  position: Position;
+  pair: Pair;
+  slippageBps: number;
+  onRemoved: () => void;
+}) {
+  const { account, wrongChain, ensureChain } = useWallet();
+  const [pct, setPct] = useState(100);
+  const [customPct, setCustomPct] = useState("");
+  const [preview, setPreview] = useState<{
+    base: bigint;
+    quote: bigint;
+    liquidity: bigint;
+  } | null>(null);
+  const [previewErr, setPreviewErr] = useState<string | null>(null);
+  const [phase, setPhase] = useState<
+    "idle" | "removing" | "remove-confirming" | "done"
+  >("idle");
+  const [statusMsg, setStatusMsg] = useState<string | null>(null);
+  const [txHash, setTxHash] = useState<string | null>(null);
+  const seq = useRef(0);
+
+  // Locked compounding positions cannot be removed at all: Ammora's own
+  // planner throws "position is locked; recovery cannot bypass lock" when
+  // permanentlyLocked is set or the current time is before
+  // lockReleasePoint, and the tAMM pool's permanently locked migration
+  // positions revert on remove (custom error 0xbdc99171). Concentrated
+  // positions have no lock fields, so they are always removable.
+  const locked =
+    pair.poolKind === "compounding" &&
+    (position.permanentlyLocked ||
+      (position.lockReleasePoint > 0 &&
+        position.lockReleasePoint * 1000 > Date.now()));
+  const lockLabel = position.permanentlyLocked
+    ? "Permanently locked"
+    : position.lockReleasePoint > 0 &&
+        position.lockReleasePoint * 1000 > Date.now()
+      ? `Locked until ${new Date(position.lockReleasePoint * 1000).toLocaleString("en-GB")}`
+      : null;
+
+  const liquidityToRemove = useMemo(() => {
+    if (pct >= 100) return position.liquidity;
+    return (position.liquidity * BigInt(pct)) / 100n;
+  }, [pct, position.liquidity]);
+
+  useEffect(() => {
+    if (locked || liquidityToRemove === 0n) {
+      setPreview(null);
+      setPreviewErr(null);
+      return;
+    }
+    const s = ++seq.current;
+    const t = setTimeout(async () => {
+      try {
+        const abi = poolAbi(pair.poolKind);
+        const [base, quote] = (await publicClient.readContract({
+          address: pair.pool,
+          abi,
+          functionName: "previewRemoveLiquidity",
+          args: [liquidityToRemove],
+        })) as readonly [bigint, bigint];
+        if (seq.current !== s) return;
+        setPreview({ base, quote, liquidity: liquidityToRemove });
+        setPreviewErr(null);
+      } catch (e) {
+        if (seq.current !== s) return;
+        setPreview(null);
+        setPreviewErr(errText(e));
+      }
+    }, 350);
+    return () => clearTimeout(t);
+  }, [liquidityToRemove, locked, pair]);
+
+  const minBase =
+    preview !== null
+      ? (preview.base * BigInt(10000 - slippageBps)) / 10000n
+      : null;
+  const minQuote =
+    preview !== null
+      ? (preview.quote * BigInt(10000 - slippageBps)) / 10000n
+      : null;
+
+  async function remove() {
+    const wc = getWalletClient();
+    if (
+      !wc ||
+      !account ||
+      preview === null ||
+      minBase === null ||
+      minQuote === null
+    )
+      return;
+    setTxHash(null);
+    setStatusMsg(null);
+    try {
+      if (!(await ensureChain())) return;
+      const abi = poolAbi(pair.poolKind);
+      setPhase("removing");
+      setStatusMsg("Confirm removing liquidity in your wallet…");
+      const deadline = BigInt(Math.floor(Date.now() / 1000) + 1200);
+      const hash = await wc.writeContract({
+        address: pair.pool,
+        abi,
+        functionName: "removeLiquidity",
+        args: [
+          position.tokenId,
+          preview.liquidity,
+          minBase,
+          minQuote,
+          account,
+          deadline,
+        ] as never,
+        account,
+      });
+      setTxHash(hash);
+      setPhase("remove-confirming");
+      setStatusMsg("Remove transaction sent. Waiting for confirmation…");
+      const receipt = await publicClient.waitForTransactionReceipt({ hash });
+      if (receipt.status !== "success")
+        throw new Error("Remove liquidity transaction reverted on-chain.");
+      setPhase("done");
+      setStatusMsg(
+        pct >= 100
+          ? "Position fully removed. The position NFT was burned by the pool."
+          : `Removed ${pct}% of the position. The rest stays in the position.`,
+      );
+      onRemoved();
+    } catch (e) {
+      setPhase("idle");
+      setStatusMsg(errText(e));
+    }
+  }
+
+  const busy = phase === "removing" || phase === "remove-confirming";
+  const baseDec = pair.tokenA.decimals;
+
+  return (
+    <div className="pos-item">
+      <div className="pos-head">
+        <b>Position #{position.tokenId.toString()}</b>
+        <span className="muted">
+          {fmt(position.baseAmount, baseDec)} {pair.tokenA.symbol} +{" "}
+          {fmt(position.quoteAmount, 18)} WETH
+        </span>
+      </div>
+      {lockLabel !== null ? (
+        <p className="note">
+          {lockLabel} — this position cannot be removed
+          {position.permanentlyLocked
+            ? " (it was permanently locked at creation, like the tAMM migration positions)."
+            : " yet. Try again after the unlock time."}
+        </p>
+      ) : (
+        <>
+          <div className="pct-row" role="group" aria-label="Remove percentage">
+            {[25, 50, 75, 100].map((p) => (
+              <button
+                key={p}
+                type="button"
+                className={`btn small${pct === p && customPct === "" ? " active" : ""}`}
+                onClick={() => {
+                  setPct(p);
+                  setCustomPct("");
+                }}
+              >
+                {p}%
+              </button>
+            ))}
+            <input
+              className="slip"
+              inputMode="numeric"
+              placeholder="%"
+              aria-label="Custom remove percentage"
+              value={customPct}
+              onChange={(e) => {
+                const v = e.target.value.replace(/[^0-9]/g, "");
+                setCustomPct(v);
+                const n = Number(v);
+                if (Number.isFinite(n) && n >= 1 && n <= 100) setPct(n);
+              }}
+            />
+          </div>
+          {preview && (
+            <p className="note">
+              You will receive about {fmt(preview.base, baseDec)}{" "}
+              {pair.tokenA.symbol} + {fmt(preview.quote, 18)} WETH
+              {minBase !== null && minQuote !== null && (
+                <>
+                  {" "}
+                  (minimum {fmt(minBase, baseDec)} {pair.tokenA.symbol} +{" "}
+                  {fmt(minQuote, 18)} WETH after slippage).
+                </>
+              )}{" "}
+              The ETH side comes back as WETH, not native ETH.
+            </p>
+          )}
+          {previewErr && (
+            <p className="err">Remove preview failed: {previewErr}</p>
+          )}
+          <button
+            className="btn small danger"
+            disabled={
+              !account ||
+              wrongChain ||
+              preview === null ||
+              busy
+            }
+            onClick={remove}
+          >
+            {phase === "removing"
+              ? "Confirm in wallet…"
+              : phase === "remove-confirming"
+                ? "Removing confirming…"
+                : `Remove ${pct}%`}
+          </button>
+          {statusMsg && <p className="status">{statusMsg}</p>}
+          {txHash && (
+            <p className="status">
+              Tx:{" "}
+              <a
+                href={`${EXPLORER_URL}/tx/${txHash}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {shortAddr(txHash)}
+              </a>
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 type Preview = { liquidity: bigint; baseUsed: bigint; quoteUsed: bigint };
 type Position = {
   tokenId: bigint;
@@ -567,7 +816,7 @@ export default function AddLpPanel({ pairs }: { pairs: Pair[] }) {
       )}
 
       <div className="wrap-box">
-        <span className="wrap-title">Your LP position</span>
+        <span className="wrap-title">Your LP positions — remove liquidity</span>
         {!account ? (
           <p className="note">Connect a wallet to see your positions in this pool.</p>
         ) : positionsErr ? (
@@ -580,30 +829,27 @@ export default function AddLpPanel({ pairs }: { pairs: Pair[] }) {
             pool when you add liquidity.
           </p>
         ) : (
-          <ul className="wd-list">
-            {positions.map((p) => (
-              <li key={p.tokenId.toString()}>
-                <div>
-                  <b>Position #{p.tokenId.toString()}</b>
-                  <span className="muted">
-                    {fmt(p.baseAmount, baseDec)} {pair.tokenA.symbol} +{" "}
-                    {fmt(p.quoteAmount, 18)} WETH
-                    {pair.poolKind === "compounding" &&
-                      (p.permanentlyLocked
-                        ? " · permanently locked"
-                        : p.lockReleasePoint > 0
-                          ? ` · locked until ${new Date(p.lockReleasePoint * 1000).toLocaleString("en-GB")}`
-                          : " · unlocked")}
-                  </span>
-                </div>
-              </li>
-            ))}
-          </ul>
+          positions.map((p) => (
+            <RemovePosition
+              key={p.tokenId.toString()}
+              position={p}
+              pair={pair}
+              slippageBps={slippageBps}
+              onRemoved={() => {
+                refreshPositions();
+                refreshBalances();
+                refreshReserves();
+              }}
+            />
+          ))
         )}
         <p className="note">
           Amounts come from the pool's own previewRemoveLiquidity for each
-          position's live liquidity, so they move with the pool. No APY is
-          shown: the pool does not promise a yield.
+          position's live liquidity, so they move with the pool. Removing
+          calls the pool's removeLiquidity directly as the position owner,
+          with no NFT approval step, and pays out in the pool's two tokens
+          (base token + WETH). A 100% removal burns the position NFT. No
+          APY is shown: the pool does not promise a yield.
         </p>
       </div>
 
@@ -612,7 +858,9 @@ export default function AddLpPanel({ pairs }: { pairs: Pair[] }) {
         interface (previewAddLiquidity, addLiquidity). You approve the pool
         itself for both tokens, then send the add. Compounding pools take a
         lock duration and permanent-lock flag (0 and false here); concentrated
-        pools take no range argument. Testnet only, tokens are play money.
+        pools take no range argument. Removing uses the same pool interface
+        (previewRemoveLiquidity, removeLiquidity). Testnet only, tokens are
+        play money.
       </p>
     </div>
   );

@@ -150,13 +150,82 @@ own pool ABIs. That shape was evidenced two independent ways:
    has 1-5), which cross-checks the simulation. `previewAddLiquidity`
    agrees with the dry-run amounts to the raw unit.
 
-Honest limits: no remove-liquidity button is shipped yet (the position
-amounts shown are the preview of a full removal); the LODOS and tAMM pools
-have never had a direct user `addLiquidity` before (their only positions
-came from migration at pool creation), so the concentrated evidence is the
-dry-run plus the shared ABI, not a prior user transaction; and the app does
-not route LP adds through the Ammora zap router, so single-sided (zap-in)
-adds are not offered.
+Honest limits: the LODOS and tAMM pools have never had a direct user
+`addLiquidity` before (their only positions came from migration at pool
+creation), so the concentrated evidence is the dry-run plus the shared ABI,
+not a prior user transaction; and the app does not route LP adds through
+the Ammora zap router, so single-sided (zap-in) adds are not offered.
+
+## Remove LP
+
+Each position in "Your LP positions" has remove controls: 25% / 50% /
+75% / 100% buttons plus a custom percentage input, a live preview of
+exactly what you get back (both token amounts, from
+`previewRemoveLiquidity` for the chosen share of the position's
+liquidity, with minimums after the panel's slippage), and a Remove
+button. Removing sends the pool's `removeLiquidity(tokenId, liquidity,
+minimumBaseAmount, minimumQuoteAmount, recipient, deadline)` (selector
+`0xf7f4925d`) straight to the pool as the position owner. A 100%
+removal burns the position NFT; the list refreshes after the transaction
+confirms. Payouts are in the pool's two tokens (base token + WETH);
+there is no automatic unwrap to native ETH.
+
+- **No NFT approval step, on purpose.** The real on-chain remove on
+  the AUICMP pool (see evidence below) was preceded only by the ERC-20
+  approves for its add; no position-NFT approval exists in the flow, and
+  Ammora's own planner builds the same straight-to-pool transaction.
+- **Locked positions cannot be removed, and the panel says so.**
+  Compounding positions carry `permanentlyLocked` and `lockReleasePoint`
+  from `getPosition`. A permanently locked position (like the tAMM
+  migration positions #1 and #2) or one still inside its lock window
+  shows its lock state and the Remove button is not offered.
+  Concentrated positions have no lock fields in `getPosition`, so they
+  are always removable.
+- **Pool kinds.** The same 6-argument `removeLiquidity` exists in both
+  the compounding and concentrated pool ABIs from the SDK, so both kinds
+  use the identical call; only the lock gating differs.
+
+### How the remove-liquidity calldata was evidenced (before shipping)
+
+1. **On-chain transaction (compounding, AUICMP).** Tx
+   `0xc10fb9f69dc29b5ae5a52510aee7f5ae58a1b2eee153689d3c99e9f76656bf59`
+   (2026-11-20, block 41858191) is a successful `removeLiquidity` on
+   the AUICMP pool, selector `0xf7f4925d`, tokenId 5, recipient the
+   caller himself, nonzero minimums (slippage-protected, like the
+   panel's), and it burned the position NFT (Transfer of tokenId 5 to
+   the zero address in the same transaction). The caller's transaction
+   history shows no ERC-721 approval to the pool before it. A second
+   real remove with the same shape exists on pool
+   `0x994d835D2E8E8e1b462a4b3aC05cC23e94F7620C` (tx
+   `0xfe3ec1d17291ffa649fc448d91777cc78c90cf07ad2619ef7ebc853105647332`),
+   also burning its tokenId 5.
+2. **Ammora's own planner (app.ammora.org JS chunks).** Their DAMM
+   planner's `planRemoveLiquidity` does exactly this: it reads the
+   owner and `getPosition`, throws "position is locked; recovery
+   cannot bypass lock" when `permanentlyLocked` is set or the current
+   time is before `lockReleasePoint`, validates the liquidity amount,
+   previews with `previewRemoveLiquidity`, applies
+   `preview * (10000 - slippageBps) / 10000` as the minimums, and
+   builds a transaction to the pool with
+   `removeLiquidity(tokenId, liquidity, minBase, minQuote, recipient,
+   deadline)` and value 0. The panel follows the same rules.
+3. **eth_call dry-runs (live positions).** `removeLiquidity` was
+   simulated from each position's owner against the live RPC at 50%
+   and 100% of the position's liquidity, with minimums 0: AUICMP #4
+   (compounding) and LODOS #1 (concentrated) both returned success
+   with amounts matching `previewRemoveLiquidity` to the raw unit
+   (AUICMP 50%: 50,794,506,761 base + 25,386,506,861,575 quote;
+   LODOS 50%: 268,893,966,070,439 base + 170,997,458,794,820,373
+   quote). The tAMM pool's existing positions #1 and #2 are
+   permanently locked, so their dry-runs revert with custom error
+   `0xbdc99171` (not in any public signature database) — which is
+   exactly why locked positions are gated off in the UI instead of
+   being offered a Remove button. No unlocked tAMM position exists
+   on-chain yet, so the tAMM remove path is evidenced by the shared
+   compounding ABI, Ammora's planner, and the AUICMP real transaction,
+   not by a direct tAMM dry-run; positions added through this app's
+   Add LP panel are minted unlocked (lock duration 0, permanent lock
+   false), so they are removable by the same call.
 
 ## Import token by contract address
 
